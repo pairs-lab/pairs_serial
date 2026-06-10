@@ -2,8 +2,8 @@
 #define SERIAL_PORT_H_
 
 #include <mutex>
-#include <ros/package.h>
-#include <ros/ros.h>
+//#include <ros/package.h>
+#include <rclcpp/rclcpp.hpp>
 #include <stdio.h>    // Standard input/output definitions
 #include <string>   // String function definitions
 #include <unistd.h>   // UNIX standard function definitions
@@ -20,6 +20,8 @@ namespace serial_port {
     class SerialPort {
     public:
         SerialPort();
+
+        void set_node(rclcpp::Node::SharedPtr nh);
 
         virtual ~SerialPort();
 
@@ -40,6 +42,8 @@ namespace serial_port {
         virtual int readSerial(uint8_t *arr, int arr_max_size);
 
         int serial_port_fd_;
+
+        rclcpp::Node::SharedPtr nh_;
     };
 
     class SerialPortThreadsafe : public SerialPort {

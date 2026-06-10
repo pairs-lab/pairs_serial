@@ -1,4 +1,4 @@
-#include "serial_port.h"
+#include <pairs_serial/serial_port.h>
 
 namespace serial_port {
 
@@ -6,6 +6,8 @@ namespace serial_port {
 
     SerialPort::SerialPort() {
     }
+
+    void SerialPort::set_node(rclcpp::Node::SharedPtr nh){ nh_ = nh; }
 
 //}
 
@@ -26,7 +28,7 @@ namespace serial_port {
 
         if (serial_status == -1) {
 
-            ROS_ERROR("[%s] Serial port disconected!", ros::this_node::getName().c_str());
+            RCLCPP_ERROR(nh_->get_logger(), "[%s] Serial port disconected!", nh_->get_name());
             close(serial_port_fd_);
             return false;
         }
@@ -47,7 +49,7 @@ namespace serial_port {
         serial_port_fd_ = open(port.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
 
         if (serial_port_fd_ == -1) {
-            ROS_ERROR_THROTTLE(1.0, "[%s]: could not open serial port %s", ros::this_node::getName().c_str(),
+            RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s]: could not open serial port %s", nh_->get_name(),
                                port.c_str());
             return false;
 
@@ -102,7 +104,7 @@ namespace serial_port {
             }
             default:
                 baudrate_set = 0;
-                ROS_ERROR_STREAM("[SerialPort] Unsupported baudrate: " << baudrate);
+                RCLCPP_ERROR_STREAM(nh_->get_logger(), "[SerialPort] Unsupported baudrate: " << baudrate);
                 return false;
         }
 
@@ -142,7 +144,7 @@ namespace serial_port {
         struct termios tty{};
         memset(&tty, 0, sizeof tty);
         if (tcgetattr(fd, &tty) != 0) {
-            ROS_ERROR("error %d from tggetattr", errno);
+            RCLCPP_ERROR(nh_->get_logger(), "error %d from tggetattr", errno);
             return;
         }
 
@@ -150,7 +152,7 @@ namespace serial_port {
         tty.c_cc[VTIME] = 0;  // 0.0 seconds read timeout
 
         if (tcsetattr(fd, TCSANOW, &tty) != 0)
-            ROS_ERROR("error %d setting term attributes", errno);
+            RCLCPP_ERROR(nh_->get_logger(), "error %d setting term attributes", errno);
     }
 
 //}
@@ -163,7 +165,7 @@ namespace serial_port {
             close(serial_port_fd_);
         }
         catch (int e) {
-            ROS_WARN_THROTTLE(1.0, "Error while closing the sensor serial line!");
+            RCLCPP_WARN_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1.0, "Error while closing the sensor serial line!");
         }
     }
 
@@ -176,7 +178,7 @@ namespace serial_port {
             return write(serial_port_fd_, (const void *) &c, 1);
         }
         catch (int e) {
-            ROS_WARN_THROTTLE(1.0, "Error while writing to serial line!");
+            RCLCPP_WARN_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1.0, "Error while writing to serial line!");
             return false;
         }
     }
@@ -192,7 +194,7 @@ namespace serial_port {
             return ret_val;
         }
         catch (int e) {
-            ROS_WARN_THROTTLE(1.0, "Error while writing to serial line!");
+            RCLCPP_WARN_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1.0, "Error while writing to serial line!");
             return false;
         }
     }

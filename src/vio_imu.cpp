@@ -1,184 +1,117 @@
-#include <ros/package.h>
-#include <stdlib.h>
-#include <ros/ros.h>
+#include <vio_imu.h>
 
-#include <sensor_msgs/Imu.h>
-#include <std_srvs/Trigger.h>
-#include <mutex>
-
-#include <pairs_lib/param_loader.h>
-
-#include <pairs_msgs/SetInt.h>
-
-#include <string>
-
-#include <serial_port.h>
-
-#include <nodelet/nodelet.h>
-#include <pluginlib/class_list_macros.h>
-
-#define BUFFER_SIZE 256
-
-#define MAXIMAL_TIME_INTERVAL 1
-
-const double G       = 9.80665;
+const double G = 9.80665;
 const double DEG2RAD = 57.2958;
 
 namespace vio_imu {
 
-/* class VioImu //{ */
+// Constructor implementation
+VioImu::VioImu(const rclcpp::NodeOptions & options) : rclcpp::Node("vio_imu", options) {
+    nh_ = std::shared_ptr<rclcpp::Node>(this);
+    serial_port_.set_node(nh_);
+    
+    // Initialize timing members here
+    interval_ = nh_->get_clock()->now();
+    last_received_ = nh_->get_clock()->now();
 
-    class VioImu : public nodelet::Nodelet {
+    // | ---------------------- Param loader ---------------------- |
 
-    public:
-        virtual void onInit();
+    pairs_lib::ParamLoader param_loader(nh_, "VioImu");
 
-    private:
-        enum serial_receiver_state {
-            WAITING_FOR_MESSSAGE,
-            EXPECTING_SIZE,
-            EXPECTING_PAYLOAD,
-            EXPECTING_CHECKSUM
-        };
+    param_loader.loadParam("uav_name", _uav_name_);
+    param_loader.loadParam("portname", _portname_, std::string("/dev/ttyUSB0"));
+    param_loader.loadParam("baudrate", baudrate_);
+    param_loader.loadParam("use_timeout", _use_timeout_, true);
+    param_loader.loadParam("serial_rate", serial_rate_, 460800);
+    param_loader.loadParam("verbose", _verbose_, true);
+    param_loader.loadParam("desired_publish_rate", desired_publish_rate, 200);
 
+    skip_factor = 1000/(desired_publish_rate);
 
-        ros::Timer serial_timer_;
-        ros::Timer maintainer_timer_;
-
-        ros::ServiceServer netgun_arm;
-        ros::ServiceServer netgun_safe;
-        ros::ServiceServer netgun_fire;
-
-        ros::ServiceServer service_frequency;
-        ros::ServiceServer service_camera_frequency;
-        ros::ServiceServer service_gyro_ui;
-        ros::ServiceServer service_accel_ui;
-        ros::ServiceServer service_gyro_filter;
-        ros::ServiceServer service_accel_filter;
-
-
-        void interpretSerialData(uint8_t data);
-
-        void callbackSerialTimer(const ros::TimerEvent &event);
-
-        void callbackMaintainerTimer(const ros::TimerEvent &event);
-
-        uint8_t connectToSensor(void);
-
-        void processMessage(uint8_t payload_size, uint8_t *input_buffer, uint8_t checksum, uint8_t checksum_rec,
-                            bool checksum_correct);
-
-        bool changeFrequency(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res);
-
-        bool changeCamFrequency(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res);
-
-        bool changeGyroUIFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res);
-
-        bool changeAccUIFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res);
-
-        bool changeGyroFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res);
-
-        bool changeAccFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res);
-
-
-        ros::NodeHandle nh_;
-
-        ros::Publisher imu_publisher_;
-        ros::Publisher imu_publisher_sync_;
-
-        serial_port::SerialPort serial_port_;
-
-        boost::function<void(uint8_t)> serial_data_callback_function_;
-
-        bool publish_bad_checksum;
-        bool _use_timeout_;
-        bool _verbose_;
-        uint16_t received_msg_ok = 0;
-        uint16_t received_msg_bad_checksum = 0;
-
-        int serial_rate_ = 5000;
-        int serial_buffer_size_ = 32;
-
-        std::string _portname_;
-        int baudrate_;
-        std::string _uav_name_;
-
-        ros::Time interval_ = ros::Time::now();
-        ros::Time last_received_ = ros::Time::now();
-
-        bool is_connected_ = false;
-        bool is_initialized_ = false;
-
-    };
-
-//}
-
-/* onInit() //{ */
-
-    void VioImu::onInit() {
-
-        // Get paramters
-        nh_ = nodelet::Nodelet::getMTPrivateNodeHandle();
-        ros::Time::waitForValid();
-
-        // | ---------------------- Param loader ---------------------- |
-
-        pairs_lib::ParamLoader param_loader(nh_, "VioImu");
-
-        param_loader.loadParam("uav_name", _uav_name_);
-        param_loader.loadParam("portname", _portname_, std::string("/dev/ttyUSB0"));
-        param_loader.loadParam("baudrate", baudrate_);
-        param_loader.loadParam("use_timeout", _use_timeout_, true);
-        param_loader.loadParam("serial_rate", serial_rate_, 460800);
-        param_loader.loadParam("verbose", _verbose_, true);
-
-        if (!param_loader.loadedSuccessfully()) {
-            ROS_ERROR("[Status]: Could not load all parameters!");
-            ros::shutdown();
-        } else {
-            ROS_INFO("[Status]: All params loaded!");
-        }
-
-        // | ---------------------------------------------------------- |
-
-        imu_publisher_ = nh_.advertise<sensor_msgs::Imu>("imu_raw", 1);
-        imu_publisher_sync_ = nh_.advertise<sensor_msgs::Imu>("imu_raw_synchronized", 1);
-
-        // Output loaded parameters to console for double checking
-        ROS_INFO_THROTTLE(1.0, "[%s] is up and running with the following parameters:",
-                          ros::this_node::getName().c_str());
-        ROS_INFO_THROTTLE(1.0, "[%s] portname: %s", ros::this_node::getName().c_str(), _portname_.c_str());
-        ROS_INFO_THROTTLE(1.0, "[%s] baudrate: %i", ros::this_node::getName().c_str(), baudrate_);
-
-        connectToSensor();
-
-        service_frequency = nh_.advertiseService("change_frequency", &VioImu::changeFrequency, this);
-        service_camera_frequency = nh_.advertiseService("change_camera_frequency", &VioImu::changeCamFrequency, this);
-        service_gyro_ui = nh_.advertiseService("change_gyro_ui_filter", &VioImu::changeGyroUIFilter, this);
-        service_accel_ui = nh_.advertiseService("change_acc_ui_filter", &VioImu::changeAccUIFilter, this);
-        service_gyro_filter = nh_.advertiseService("change_gyro_filter", &VioImu::changeGyroFilter, this);
-        service_accel_filter = nh_.advertiseService("change_acc_filter", &VioImu::changeAccFilter, this);
-
-        serial_timer_ = nh_.createTimer(ros::Rate(serial_rate_), &VioImu::callbackSerialTimer, this);
-        maintainer_timer_ = nh_.createTimer(ros::Rate(1), &VioImu::callbackMaintainerTimer, this);
-
-        is_initialized_ = true;
+    if (!param_loader.loadedSuccessfully()) {
+        RCLCPP_ERROR(nh_->get_logger(), "[Status]: Could not load all parameters!");
+        rclcpp::shutdown();
+    } else {
+        RCLCPP_INFO(nh_->get_logger(), "[Status]: All params loaded!");
     }
-//}
 
+    // | ---------------------------------------------------------- |
 
-//}
+    imu_publisher_ = pairs_lib::PublisherHandler<sensor_msgs::msg::Imu>(nh_, "~/imu_raw_out");
+    imu_publisher_sync_ = pairs_lib::PublisherHandler<sensor_msgs::msg::Imu>(nh_, "~/imu_raw_synchronized_out");
+
+    // Output loaded parameters to console for double checking
+    RCLCPP_INFO_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s] is up and running with the following parameters:",
+                        nh_->get_name());
+    RCLCPP_INFO_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s] portname: %s", nh_->get_name(), _portname_.c_str());
+    RCLCPP_INFO_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s] baudrate: %i", nh_->get_name(), baudrate_);
+
+    connectToSensor();
+
+    service_frequency = pairs_lib::ServiceServerHandler<pairs_msgs::srv::SetInt>(
+        nh_, 
+        std::string("change_frequency"), 
+        std::bind(&VioImu::changeFrequency, this, std::placeholders::_1, std::placeholders::_2),
+        rclcpp::SystemDefaultsQoS(),  // QoS parameter
+        nullptr  // callback group
+    );
+
+    service_camera_frequency = pairs_lib::ServiceServerHandler<pairs_msgs::srv::SetInt>(
+        nh_, 
+        std::string("change_camera_frequency"), 
+        std::bind(&VioImu::changeCamFrequency, this, std::placeholders::_1, std::placeholders::_2),
+        rclcpp::SystemDefaultsQoS(),  // QoS parameter
+        nullptr  // callback group
+    );
+
+    service_gyro_ui = pairs_lib::ServiceServerHandler<pairs_msgs::srv::SetInt>(
+        nh_, 
+        std::string("change_gyro_ui_filter"), 
+        std::bind(&VioImu::changeGyroUIFilter, this, std::placeholders::_1, std::placeholders::_2),
+        rclcpp::SystemDefaultsQoS(),  // QoS parameter
+        nullptr  // callback group
+    );
+
+    service_accel_ui = pairs_lib::ServiceServerHandler<pairs_msgs::srv::SetInt>(
+        nh_, 
+        std::string("change_acc_ui_filter"), 
+        std::bind(&VioImu::changeAccUIFilter, this, std::placeholders::_1, std::placeholders::_2),
+        rclcpp::SystemDefaultsQoS(),  // QoS parameter
+        nullptr  // callback group
+    );
+
+    service_gyro_filter = pairs_lib::ServiceServerHandler<pairs_msgs::srv::SetInt>(
+        nh_, 
+        std::string("change_gyro_filter"), 
+        std::bind(&VioImu::changeGyroFilter, this, std::placeholders::_1, std::placeholders::_2),
+        rclcpp::SystemDefaultsQoS(),  // QoS parameter
+        nullptr  // callback group
+    );
+
+    service_accel_filter = pairs_lib::ServiceServerHandler<pairs_msgs::srv::SetInt>(
+        nh_, 
+        std::string("change_acc_filter"), 
+        std::bind(&VioImu::changeAccFilter, this, std::placeholders::_1, std::placeholders::_2),
+        rclcpp::SystemDefaultsQoS(),  // QoS parameter
+        nullptr  // callback group
+    );
+
+    serial_timer_ = std::make_shared<pairs_lib::ROSTimer>(nh_, rclcpp::Rate(serial_rate_, nh_->get_clock()), std::bind(&VioImu::callbackSerialTimer, this));
+    maintainer_timer_ = std::make_shared<pairs_lib::ROSTimer>(nh_, rclcpp::Rate(1, nh_->get_clock()), std::bind(&VioImu::callbackMaintainerTimer, this));
+
+    is_initialized_ = true;
+}
 
 // | ------------------------ callbacks ------------------------ |
 
 /* callbackSerialTimer() //{ */
 
-    void VioImu::callbackSerialTimer(const ros::TimerEvent &event) {
+    void VioImu::callbackSerialTimer() {
 
-        uint8_t read_buffer[serial_buffer_size_];
+        uint8_t read_buffer[SERIAL_BUFFER_SIZE];
         int bytes_read;
 
-        bytes_read = serial_port_.readSerial(read_buffer, serial_buffer_size_);
+        bytes_read = serial_port_.readSerial(read_buffer, SERIAL_BUFFER_SIZE);
 
         for (int i = 0; i < bytes_read; i++) {
             interpretSerialData(read_buffer[i]);
@@ -190,21 +123,21 @@ namespace vio_imu {
 
 /* callbackMaintainerTimer() //{ */
 
-    void VioImu::callbackMaintainerTimer(const ros::TimerEvent &event) {
+    void VioImu::callbackMaintainerTimer() {
 
         if (is_connected_) {
 
             if (!serial_port_.checkConnected()) {
                 is_connected_ = false;
-                ROS_ERROR_STREAM("[" << ros::this_node::getName().c_str() << "] Serial device is disconnected! ");
+                RCLCPP_ERROR_STREAM(nh_->get_logger(),"[" << nh_->get_name() << "] Serial device is disconnected! ");
             }
         }
 
-        if (((ros::Time::now() - last_received_).toSec() > MAXIMAL_TIME_INTERVAL) && _use_timeout_ && is_connected_) {
+        if (((nh_->get_clock()->now() - last_received_).seconds() > MAXIMAL_TIME_INTERVAL) && _use_timeout_ && is_connected_) {
 
             is_connected_ = false;
 
-            ROS_ERROR_STREAM("[" << ros::this_node::getName().c_str()
+            RCLCPP_ERROR_STREAM(nh_->get_logger(),"[" << nh_->get_name()
                                  << "] Serial port timed out - no messages were received in " << MAXIMAL_TIME_INTERVAL
                                  << " seconds");
         }
@@ -214,7 +147,7 @@ namespace vio_imu {
             received_msg_ok = 0;
             received_msg_bad_checksum = 0;
 
-            interval_ = ros::Time::now();
+            interval_ = nh_->get_clock()->now();
 
         } else {
 
@@ -236,8 +169,8 @@ namespace vio_imu {
         static uint8_t buffer_counter = 0;
         static uint8_t checksum = 0;
 
-        if (_verbose_)
-            ROS_INFO_STREAM_THROTTLE(1.0, "[VioImu]: receiving IMU ok");
+        //if (_verbose_)
+        //    RCLCPP_INFO_STREAM_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1000, "[VioImu]: receiving IMU ok");
 
         switch (rec_state) {
             case WAITING_FOR_MESSSAGE:
@@ -252,8 +185,8 @@ namespace vio_imu {
             case EXPECTING_SIZE:
 
                 if (single_character == 0) {
-                    ROS_ERROR_THROTTLE(1.0, "[%s]: Message with 0 payload_size received, discarding.",
-                                       ros::this_node::getName().c_str());
+                    RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s]: Message with 0 payload_size received, discarding.",
+                                       nh_->get_name());
                     rec_state = WAITING_FOR_MESSSAGE;
                 } else {
                     payload_size = single_character;
@@ -276,7 +209,7 @@ namespace vio_imu {
 
                 if (checksum == single_character) {
                     processMessage(payload_size, input_buffer, checksum, single_character, true);
-                    last_received_ = ros::Time::now();
+                    last_received_ = nh_->get_clock()->now();
                     rec_state = WAITING_FOR_MESSSAGE;
                 } else {
                     if (publish_bad_checksum) {
@@ -295,6 +228,10 @@ namespace vio_imu {
 
     void VioImu::processMessage(uint8_t payload_size, uint8_t *input_buffer, uint8_t checksum, uint8_t checksum_rec,
                                 bool checksum_correct) {
+        message_counter++;
+        if(message_counter % skip_factor) return;
+
+        (void)checksum; (void)checksum_rec; // suppressing 'unused parameter' warning
 
         if (payload_size == 13 && (input_buffer[0] == 0x30 || input_buffer[0] == 0x31) && checksum_correct) {
 
@@ -309,7 +246,7 @@ namespace vio_imu {
             gyro_y = int16_t(input_buffer[9] << 8) | (input_buffer[10] & 0xff);
             gyro_z = int16_t(input_buffer[11] << 8) | (input_buffer[12] & 0xff);
 
-            sensor_msgs::Imu imu;
+            sensor_msgs::msg::Imu imu;
 
             imu.linear_acceleration.x = (double(acc_x) / 4096) * G;
             imu.linear_acceleration.y = (double(acc_y) / 4096) * G;
@@ -319,7 +256,7 @@ namespace vio_imu {
             imu.angular_velocity.y = (double(gyro_y) / 65.536) / DEG2RAD;
             imu.angular_velocity.z = (double(gyro_z) / 65.536) / DEG2RAD;
 
-            imu.header.stamp = ros::Time::now();
+            imu.header.stamp = nh_->get_clock()->now();
             imu.header.frame_id = _uav_name_ + "/vio_imu";
             if (input_buffer[0] == 0x30) {
 
@@ -337,17 +274,17 @@ namespace vio_imu {
 
     uint8_t VioImu::connectToSensor(void) {
 
-        ROS_INFO_THROTTLE(1.0, "[%s]: Openning the serial port.", ros::this_node::getName().c_str());
+        RCLCPP_INFO_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s]: Openning the serial port.", nh_->get_name());
 
         if (!serial_port_.connect(_portname_, baudrate_)) {
-            ROS_ERROR_THROTTLE(1.0, "[%s]: Could not connect to sensor.", ros::this_node::getName().c_str());
+            RCLCPP_ERROR_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s]: Could not connect to sensor.", nh_->get_name());
             is_connected_ = false;
             return 0;
         }
 
-        ROS_INFO_THROTTLE(1.0, "[%s]: Connected to sensor.", ros::this_node::getName().c_str());
+        RCLCPP_INFO_THROTTLE(nh_->get_logger(), *nh_->get_clock(), 1, "[%s]: Connected to sensor.", nh_->get_name());
         is_connected_ = true;
-        last_received_ = ros::Time::now();
+        last_received_ = nh_->get_clock()->now();
 
         return 1;
     }
@@ -356,156 +293,169 @@ namespace vio_imu {
 
 // | ------------------------ services ------------------------ |
 
-/* changeGyroFilter() //{ */
-
-    bool VioImu::changeGyroUIFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res) {
-        if (!is_initialized_) {
-            return false;
-        }
-        if (req.value < 1 || req.value > 3) {
-            return false;
-        }
-        char msg[8];
-        sprintf(msg, "b\x01%05ld", req.value);
-        if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
-            ROS_INFO("[%s] : change gyro UI filter to %ld order", ros::this_node::getName().c_str(), req.value);
-            res.success = true;
-            res.message = "Done";
-            return true;
-        } else {
-            res.success = false;
-            res.message = "Fail";
-            return false;
-        }
+void VioImu::changeGyroUIFilter(std::shared_ptr<pairs_msgs::srv::SetInt::Request> req, std::shared_ptr<pairs_msgs::srv::SetInt::Response> res) {
+    if (!is_initialized_) {
+        res->success = false;
+        res->message = "not initialized yet";
+        RCLCPP_WARN(get_logger(), res->message.c_str());
+        return;
     }
-
-//}
-
-/* changeAccFilter() //{ */
-
-    bool VioImu::changeAccUIFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res) {
-        if (!is_initialized_) {
-            return false;
-        }
-        if (req.value < 1 || req.value > 3) {
-            return false;
-        }
-        char msg[8];
-        sprintf(msg, "b\x02%05ld", req.value);
-        if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
-            ROS_INFO("[%s] : change accelerometer UI filter to %ld order", ros::this_node::getName().c_str(),
-                     req.value);
-            res.success = true;
-            res.message = "Done";
-            return true;
-        } else {
-            res.success = false;
-            res.message = "Fail";
-            return false;
-        }
+    if (req->value < 1 || req->value > 3) {
+        res->success = false;
+        res->message = "invalid value - not between 1 and 3 ";
+        RCLCPP_ERROR(get_logger(), res->message.c_str());
+        return;
     }
-
-//}
-
-/* changeFrequency() //{ */
-
-    bool VioImu::changeFrequency(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res) {
-        if (!is_initialized_) {
-            return false;
-        }
-        if (req.value > 99999) {
-            return false;
-        }
-        char msg[8];
-        sprintf(msg, "b\x03%05zu", req.value);
-        if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
-            ROS_INFO("[%s] : changed samples frequency to %ld", ros::this_node::getName().c_str(), req.value);
-            res.success = true;
-            res.message = "Done";
-            return true;
-        } else {
-            res.success = false;
-            res.message = "Fail";
-            return false;
-        }
+    char msg[8];
+    sprintf(msg, "b\x01%05ld", req->value);
+    if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
+        RCLCPP_INFO(get_logger(), "[%s] : change gyro UI filter to %ld order", nh_->get_name(), req->value);
+        res->success = true;
+        res->message = "Done";
+        return;
+    } else {
+        res->success = false;
+        res->message = "Fail";
+        return;
     }
+}
 
-//}
-
-/* changeCamFrequency() //{ */
-
-    bool VioImu::changeCamFrequency(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res) {
-        if (!is_initialized_) {
-            return false;
-        }
-        if (req.value > 99999) {
-            return false;
-        }
-        char msg[8];
-        sprintf(msg, "b\x04%05zu", req.value);
-        if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
-            ROS_INFO("[%s] : changed camera frequency to %ld", ros::this_node::getName().c_str(), req.value);
-            res.success = true;
-            res.message = "Done";
-            return true;
-        } else {
-            res.success = false;
-            res.message = "Fail";
-            return false;
-        }
+void VioImu::changeAccUIFilter(std::shared_ptr<pairs_msgs::srv::SetInt::Request> req, std::shared_ptr<pairs_msgs::srv::SetInt::Response> res) {
+    if (!is_initialized_) {
+        res->success = false;
+        res->message = "not initialized yet";
+        RCLCPP_WARN(get_logger(), res->message.c_str());
+        return;
     }
-
-//}
-
-/* changeGyroFilter() //{ */
-
-    bool VioImu::changeGyroFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res) {
-        if (!is_initialized_) {
-            return false;
-        }
-        char msg[8];
-        sprintf(msg, "b\x05%05ld", req.value);
-        if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
-            auto turn = [](int a) -> std::string { if (a == 1) return "on"; else if (a == 0) return "off"; return "";};
-            ROS_INFO("[%s] : turn %s gyro filters", ros::this_node::getName().c_str(),
-                     turn(req.value).c_str());
-            res.success = true;
-            res.message = "Done";
-            return true;
-        } else {
-            res.success = false;
-            res.message = "Fail";
-            return false;
-        }
+    if (req->value < 1 || req->value > 3) {
+        res->success = false;
+        res->message = "invalid value - not between 1 and 3 ";
+        RCLCPP_ERROR(get_logger(), res->message.c_str());
+        return;
     }
-
-//}
-
-/* changeAccFilter() //{ */
-
-    bool VioImu::changeAccFilter(pairs_msgs::SetInt::Request &req, pairs_msgs::SetInt::Response &res) {
-        if (!is_initialized_) {
-            return false;
-        }
-        char msg[8];
-        sprintf(msg, "b\x06%05ld", req.value);
-        if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
-            auto turn = [](int a) -> std::string { if (a == 1) return "on"; else if (a == 0) return "off"; return "";};
-            ROS_INFO("[%s] : turn %s accelerometer filters", ros::this_node::getName().c_str(),
-                     turn(req.value).c_str());
-            res.success = true;
-            res.message = "Done";
-            return true;
-        } else {
-            res.success = false;
-            res.message = "Fail";
-            return false;
-        }
+    char msg[8];
+    sprintf(msg, "b\x02%05ld", req->value);
+    if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
+        RCLCPP_INFO(get_logger(), "[%s] : change accelerometer UI filter to %ld order", nh_->get_name(),
+                    req->value);
+        res->success = true;
+        res->message = "Done";
+        return;
+    } else {
+        res->success = false;
+        res->message = "Fail";
+        return;
     }
+}
 
-//}
+void VioImu::changeFrequency(std::shared_ptr<pairs_msgs::srv::SetInt::Request> req, std::shared_ptr<pairs_msgs::srv::SetInt::Response> res) {
+    if (!is_initialized_) {
+        res->success = false;
+        res->message = "not initialized yet";
+        RCLCPP_WARN(get_logger(), res->message.c_str());
+        return;
+    }
+    unsigned int max_val = 99999;
+    if (req->value > max_val) {
+        res->success = false;
+        std::ostringstream oss;
+        oss << "invalid value - it is greater than " << max_val;
+        res->message = oss.str();
+        RCLCPP_ERROR(get_logger(), res->message.c_str());
+        return;
+    }
+    char msg[8];
+    sprintf(msg, "b\x03%05zu", req->value);
+    if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
+        RCLCPP_INFO(get_logger(), "[%s] : changed samples frequency to %ld", nh_->get_name(), req->value);
+        res->success = true;
+        res->message = "Done";
+        return;
+    } else {
+        res->success = false;
+        res->message = "Fail";
+        return;
+    }
+}
+
+void VioImu::changeCamFrequency(std::shared_ptr<pairs_msgs::srv::SetInt::Request> req, std::shared_ptr<pairs_msgs::srv::SetInt::Response> res) {
+    if (!is_initialized_) {
+        res->success = false;
+        res->message = "not initialized yet";
+        RCLCPP_WARN(get_logger(), res->message.c_str());
+        return;
+    }
+    unsigned int max_val = 99999;
+    if (req->value > max_val) {
+        res->success = false;
+        std::ostringstream oss;
+        oss << "invalid value - it is greater than " << max_val;
+        res->message = oss.str();
+        RCLCPP_ERROR(get_logger(), res->message.c_str());
+        return;
+    }
+    char msg[8];
+    sprintf(msg, "b\x04%05zu", req->value);
+    if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
+        RCLCPP_INFO(get_logger(), "[%s] : changed camera frequency to %ld", nh_->get_name(), req->value);
+        res->success = true;
+        res->message = "Done";
+        return;
+    } else {
+        res->success = false;
+        res->message = "Fail";
+        return;
+    }
+}
+
+void VioImu::changeGyroFilter(std::shared_ptr<pairs_msgs::srv::SetInt::Request> req, std::shared_ptr<pairs_msgs::srv::SetInt::Response> res) {
+    if (!is_initialized_) {
+        res->success = false;
+        res->message = "not initialized yet";
+        RCLCPP_WARN(get_logger(), res->message.c_str());
+        return;
+    }
+    char msg[8];
+    sprintf(msg, "b\x05%05ld", req->value);
+    if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
+        auto turn = [](int a) -> std::string { if (a == 1) return "on"; else if (a == 0) return "off"; return "";};
+        RCLCPP_INFO(get_logger(), "[%s] : turn %s gyro filters", nh_->get_name(),
+                    turn(req->value).c_str());
+        res->success = true;
+        res->message = "Done";
+        return;
+    } else {
+        res->success = false;
+        res->message = "Fail";
+        return;
+    }
+}
+
+void VioImu::changeAccFilter(std::shared_ptr<pairs_msgs::srv::SetInt::Request> req, std::shared_ptr<pairs_msgs::srv::SetInt::Response> res) {
+    if (!is_initialized_) {
+        res->success = false;
+        res->message = "not initialized yet";
+        RCLCPP_WARN(get_logger(), res->message.c_str());
+        return;
+    }
+    char msg[8];
+    sprintf(msg, "b\x06%05ld", req->value);
+    if (serial_port_.sendCharArray(reinterpret_cast<uint8_t *>(msg), sizeof(msg))) {
+        auto turn = [](int a) -> std::string { if (a == 1) return "on"; else if (a == 0) return "off"; return "";};
+        RCLCPP_INFO(get_logger(), "[%s] : turn %s accelerometer filters", nh_->get_name(),
+                    turn(req->value).c_str());
+        res->success = true;
+        res->message = "Done";
+        return;
+    } else {
+        res->success = false;
+        res->message = "Fail";
+        return;
+    }
+}
 
 
 }  // namespace vio_imu
 
-PLUGINLIB_EXPORT_CLASS(vio_imu::VioImu, nodelet::Nodelet);
+#include <rclcpp_components/register_node_macro.hpp>
+RCLCPP_COMPONENTS_REGISTER_NODE(vio_imu::VioImu)

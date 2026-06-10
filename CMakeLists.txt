@@ -1,189 +1,122 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.8)
 project(pairs_serial)
 
-set(CMAKE_CXX_STANDARD 17)
+# set the correct standards
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CATKIN_DEPENDENCIES
-  roscpp
-  cmake_modules
-  nodelet
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+set(DEPENDENCIES
+  rclcpp
+  rclcpp_components
+  ament_cmake
   sensor_msgs
-  pairs_msgs
-  pairs_modules_msgs
-  std_msgs
+  std_srvs
   pairs_lib
-  dynamic_reconfigure
-  )
-
-find_package(catkin REQUIRED COMPONENTS
-  ${CATKIN_DEPENDENCIES}
-  )
-
-generate_dynamic_reconfigure_options(
-  config/gimbal.cfg
+  pairs_msgs
+  rcl_interfaces
   )
 
 set(LIBRARIES
-  PairsSerial_VioImu
-  PairsSerial_NmeaParser
-  PairsSerial_BacaProtocol
-  PairsSerial_Servo
-  PairsSerial_Led
-  PairsSerial_Estop
-  PairsSerial_Ultrasound
-  PairsSerial_TarotGimbal
-  PairsSerial_Gimbal
-  PairsSerial_Eagle
+  PairsSerial_SerialPort
+  PairsSerial_VioImu_component
   )
 
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES ${LIBRARIES}
-  CATKIN_DEPENDS ${CATKIN_DEPENDENCIES}
-  )
+#set(EXECUTABLES
+#  PairsSerial_VioImu
+#  )
+
+foreach(DEP IN LISTS DEPENDENCIES)
+  find_package(${DEP} REQUIRED)
+endforeach()
 
 include_directories(
   include
-  ${catkin_INCLUDE_DIRS}
-  ${dynamic_reconfigure_PACKAGE_PATH}/cmake/cfgbuild.cmake
-  )
-
-# Eagle
-
-add_library(PairsSerial_Eagle
-  src/eagle.cpp
-  src/serial_port.cpp
-  )
-
-# PairsSerial_VioImu
-
-add_library(PairsSerial_VioImu
-  src/vio_imu.cpp
-  src/serial_port.cpp
-  )
-
-target_link_libraries(PairsSerial_VioImu
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_NmeaParser
-
-add_library(PairsSerial_NmeaParser
-  src/nmea_parser.cpp
-  src/serial_port.cpp
-  )
-
-target_link_libraries(PairsSerial_NmeaParser
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_BacaProtocol
-
-add_library(PairsSerial_BacaProtocol
-  src/baca_protocol.cpp
-  src/serial_port.cpp
-  )
-
-target_link_libraries(PairsSerial_BacaProtocol
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_Servo
-
-add_library(PairsSerial_Servo
-  src/servo.cpp
-  src/serial_port.cpp
-  )
-
-target_link_libraries(PairsSerial_Servo
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_Led
-
-add_library(PairsSerial_Led
-  src/led.cpp
-  src/serial_port.cpp
-  )
-
-target_link_libraries(PairsSerial_Led
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_Estop
-
-add_library(PairsSerial_Estop
-  src/estop.cpp
-  src/serial_port.cpp
-  )
-
-target_link_libraries(PairsSerial_Estop
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_Ultrasound
-
-add_library(PairsSerial_Ultrasound
-  src/ultrasound.cpp
-  src/serial_port.cpp)
-
-target_link_libraries(PairsSerial_Ultrasound
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_TarotGimbal
-
-add_library(PairsSerial_TarotGimbal
-  src/tarot_gimbal.cpp
-  src/serial_port.cpp)
-
-target_link_libraries(PairsSerial_TarotGimbal
-  ${catkin_LIBRARIES}
-  )
-
-# PairsSerial_Gimbal
-
-add_library(PairsSerial_Gimbal
-  src/gimbal.cpp
-  src/serial_port.cpp
-  src/SBGC_lib/SBGC_cmd_helpers.cpp
-  include/gimbal.hpp
-  )
-
-add_dependencies(PairsSerial_Gimbal
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-  ${PROJECT_NAME}_gencfg
-  )
-
-target_link_libraries(PairsSerial_Gimbal
-  ${catkin_LIBRARIES}
+  ${pairs_lib_INCLUDE_DIRS}
+  ${rclcpp_INCLUDE_DIRS}
   )
 
 ## --------------------------------------------------------------
-## |                           Install                          |
+## |                       compile                              |
 ## --------------------------------------------------------------
 
-install(TARGETS ${LIBRARIES}
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
+## | ----------------------- Serial Port ---------------------- |
+
+add_library(PairsSerial_SerialPort SHARED
+  src/serial_port.cpp
   )
 
-install(DIRECTORY launch config rviz
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-  )
-
-install(DIRECTORY tmux_scripts
-  USE_SOURCE_PERMISSIONS
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-  )
-
-install(DIRECTORY include
-  DESTINATION ${CATKIN_GLOBAL_INCLUDE_DESTINATION}
+ament_target_dependencies(PairsSerial_SerialPort
+  ${DEPENDENCIES}
 )
 
-install(FILES nodelets.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+## | ------------------------- VIO IMU ------------------------ |
+
+add_library(PairsSerial_VioImu_component SHARED
+  #src/vio_imu_node.cpp
+  src/vio_imu.cpp
+)
+
+target_compile_features(PairsSerial_VioImu_component PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
+
+target_link_libraries(PairsSerial_VioImu_component
+  PairsSerial_SerialPort
+)
+
+rclcpp_components_register_node(
+    PairsSerial_VioImu_component
+    PLUGIN "vio_imu::VioImu"
+    EXECUTABLE PairsSerial_VioImu
+)
+
+ament_target_dependencies(PairsSerial_VioImu_component
+  ${DEPENDENCIES}
+)
+
+## --------------------------------------------------------------
+## |                           Testing                          |
+## --------------------------------------------------------------
+
+ament_export_libraries(
+  ${LIBRARIES}
   )
+
+install(TARGETS
+  ${LIBRARIES}
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  )
+
+install(
+  DIRECTORY include
+  DESTINATION .
+  )
+
+#install(TARGETS ${EXECUTABLES}
+#  DESTINATION lib/${PROJECT_NAME}
+#  )
+
+install(
+  DIRECTORY launch config
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_export_include_directories(
+  include
+  )
+
+ament_export_targets(
+  export_${PROJECT_NAME} HAS_LIBRARY_TARGET
+  )
+
+ament_export_dependencies(
+  ${DEPENDENCIES}
+  )
+
+ament_package()
