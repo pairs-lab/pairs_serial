@@ -1,0 +1,2 @@
+# how often should the driver send a heartbeat to the gimbal
+heartbeat_period: 1.0 # seconds
